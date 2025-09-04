@@ -1,0 +1,417 @@
+<div id="calendar-container">
+  <div id="calendar-header">
+    <div id="year-selector">
+      <button id="prev-year" onclick="changeYear(-1)">‹</button>
+      <span id="current-year">2025</span>
+      <button id="next-year" onclick="changeYear(1)">›</button>
+    </div>
+    <div id="calendar-legend">
+      <span>less</span>
+      <div class="legend-colors">
+        <div class="legend-item level-0" title="0 commit"></div>
+        <div class="legend-item level-1" title="1 commits"></div>
+        <div class="legend-item level-2" title="2 commits"></div>
+        <div class="legend-item level-3" title="3 commits"></div>
+        <div class="legend-item level-4" title="4+ commits"></div>
+      </div>
+      <span>more</span>
+    </div>
+  </div>
+  
+  <div id="calendar-wrapper">
+    <div id="calendar-grid"></div>
+  </div>
+  
+  <div id="tooltip" class="tooltip"></div>
+</div>
+
+<style>
+#calendar-container {
+  margin: 20px 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+#calendar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0px;
+}
+
+#year-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#year-selector button {
+  background: none;
+  border: none;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 16px;
+  color: #24292f;
+  transition: all 0.2s ease;
+  border-radius: 4px;
+}
+
+#year-selector button:hover {
+  background: #f3f4f6;
+}
+
+#current-year {
+  font-size: 16px;
+  font-weight: 600;
+  color: #24292f;
+  min-width: 50px;
+  text-align: center;
+}
+
+#calendar-legend {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  color: #656d76;
+}
+
+.legend-colors {
+  display: flex;
+  margin: 0 5px;
+}
+
+.legend-item {
+  width: 10px;
+  height: 10px;
+  margin: 0 1px;
+  border-radius: 2px;
+}
+
+#calendar-wrapper {
+  padding: 20px;
+  background: #f6f8fa;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+#calendar-grid {
+  display: flex;
+  gap: 2px;
+}
+
+.week-column {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.calendar-cell {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.calendar-cell:hover {
+  transform: scale(1.2);
+  border: 1px solid #1f2328;
+}
+
+.level-0 { background-color: #ebedf0; }
+.level-1 { background-color: #9be9a8; }
+.level-2 { background-color: #40c463; }
+.level-3 { background-color: #30a14e; }
+.level-4 { background-color: #216e39; }
+
+.tooltip {
+  position: absolute;
+  background: #1f2328;
+  color: white;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 1000;
+  opacity: 0;
+  transition: opacity 0.2s;
+  white-space: pre-line;
+}
+
+.tooltip.show {
+  opacity: 1;
+}
+</style>
+
+<script>
+// 事件数据变量
+let events = {};
+// API 基址：
+// - 优先使用同源路由（例如你在 Cloudflare 上配置了 /api/* 反向到 Worker）
+// - 也支持在主题/布局里设置 window.CONTRIB_API = 'https://<your-worker>.workers.dev'
+const API_BASE = (typeof window !== 'undefined' && window.CONTRIB_API)
+  ? window.CONTRIB_API
+  : 'https://gh-contri-api.oneloved.top';
+let usingApi = false;
+let apiYears = { startYear: null, endYear: null };
+
+// 拉取 API 的年份范围
+async function fetchApiYears() {
+  const res = await fetch(`${API_BASE}/api/years`, { credentials: 'omit' });
+  if (!res.ok) throw new Error('years api failed');
+  return res.json();
+}
+
+// 拉取某一年的贡献数据（与本地 events 结构兼容）
+async function fetchYearData(year) {
+  const res = await fetch(`${API_BASE}/api/contributions?year=${year}`, { credentials: 'omit' });
+  if (!res.ok) throw new Error('contrib api failed');
+  const data = await res.json();
+  // 合并到全局 events
+  Object.assign(events, data || {});
+}
+
+// 从数据源加载事件（优先 API，失败回退本地 JSON）
+async function loadEvents() {
+  // 先尝试 API
+  try {
+    const years = await fetchApiYears();
+    if (years && Number.isInteger(years.startYear) && Number.isInteger(years.endYear)) {
+      usingApi = true;
+      apiYears = { startYear: years.startYear, endYear: years.endYear };
+      availableYears = [];
+      for (let y = years.endYear; y >= years.startYear; y--) availableYears.push(y);
+      currentYear = years.endYear;
+      await fetchYearData(currentYear);
+      return; // 成功使用 API
+    }
+  } catch (e) {
+    console.warn('API 不可用，回退到本地 JSON:', e?.message || e);
+  }
+
+  // 回退到本地 JSON
+  try {
+    const response = await fetch('./events.json');
+    if (response.ok) {
+      events = await response.json();
+    } else {
+      console.warn('无法加载事件数据文件');
+      events = {};
+    }
+  } catch (error) {
+    console.error('加载事件数据时出错:', error);
+    events = {};
+  }
+}
+
+// 获取有事件记录的年份
+function getAvailableYears() {
+  const years = new Set();
+  const currentYear = new Date().getFullYear();
+  
+  Object.keys(events).forEach(dateStr => {
+    const year = parseInt(dateStr.split('-')[0]);
+    // 只包含不超过当前年份的年份
+    if (year <= currentYear) {
+      years.add(year);
+    }
+  });
+  
+  return Array.from(years).sort((a, b) => b - a); // 降序排列
+}
+
+let availableYears = getAvailableYears();
+let currentYear = availableYears.length > 0 ? availableYears[0] : new Date().getFullYear();
+
+// 生成日历
+function generateCalendar(year = currentYear) {
+  const grid = document.getElementById('calendar-grid');
+  
+  grid.innerHTML = '';
+  
+  // 获取年份的第一天和最后一天
+  const startDate = new Date(year, 0, 1);
+  const endDate = new Date(year, 11, 31);
+  
+  // 计算第一周的开始日期（周日开始）
+  const firstWeekStart = new Date(startDate);
+  firstWeekStart.setDate(startDate.getDate() - startDate.getDay());
+  
+  // 计算最后一周的结束日期
+  const lastWeekEnd = new Date(endDate);
+  lastWeekEnd.setDate(endDate.getDate() + (6 - endDate.getDay()));
+  
+  // 按周生成日历
+  for (let weekStart = new Date(firstWeekStart); weekStart <= lastWeekEnd; weekStart.setDate(weekStart.getDate() + 7)) {
+    const weekColumn = document.createElement('div');
+    weekColumn.className = 'week-column';
+    
+    // 为每周的7天创建单元格
+    for (let dayOffset = 0; dayOffset < 7; dayOffset++) {
+      const currentDate = new Date(weekStart);
+      currentDate.setDate(weekStart.getDate() + dayOffset);
+      
+      const dateStr = currentDate.toISOString().split('T')[0];
+      const isCurrentYear = currentDate.getFullYear() === year;
+      
+      const eventCount = events[dateStr] ? events[dateStr].length : 0;
+      const level = Math.min(eventCount, 4);
+      
+      const cell = document.createElement('div');
+      cell.className = `calendar-cell level-${level}`;
+      cell.dataset.date = dateStr;
+      
+      // 如果不是当前年份，设置为透明
+      if (!isCurrentYear) {
+        cell.style.opacity = '0.3';
+      }
+      
+      // 添加悬停事件
+      cell.addEventListener('mouseenter', showTooltip);
+      cell.addEventListener('mouseleave', hideTooltip);
+      
+      weekColumn.appendChild(cell);
+    }
+    
+    grid.appendChild(weekColumn);
+  }
+  
+  // 更新年份选择器按钮状态
+  updateYearSelectorButtons();
+}
+
+// 显示提示
+function showTooltip(e) {
+  const tooltip = document.getElementById('tooltip');
+  const date = e.target.dataset.date;
+  const eventList = events[date] || [];
+  
+  let content = `${date}\n`;
+  
+  if (eventList.length === 0) {
+    content += 'no commits';
+  } else {
+    // 统计相同事件的出现次数
+    const eventCounts = {};
+    eventList.forEach(event => {
+      eventCounts[event] = (eventCounts[event] || 0) + 1;
+    });
+    
+    const uniqueEvents = Object.keys(eventCounts);
+    
+    uniqueEvents.forEach(event => {
+      const count = eventCounts[event];
+      if (count > 1) {
+        content += `• ${event} *${count}\n`;
+      } else {
+        content += `• ${event}\n`;
+      }
+    });
+  }
+  
+  tooltip.textContent = content;
+  tooltip.style.left = e.pageX + 10 + 'px';
+  tooltip.style.top = e.pageY - 10 + 'px';
+  tooltip.classList.add('show');
+}
+
+// 隐藏提示
+function hideTooltip() {
+  const tooltip = document.getElementById('tooltip');
+  tooltip.classList.remove('show');
+}
+
+// 更新年份选择器按钮状态
+function updateYearSelectorButtons() {
+  const prevButton = document.getElementById('prev-year');
+  const nextButton = document.getElementById('next-year');
+  let canPrev, canNext;
+
+  if (usingApi && apiYears.startYear && apiYears.endYear) {
+    canPrev = currentYear > apiYears.startYear;
+    canNext = currentYear < apiYears.endYear;
+  } else {
+    const currentIndex = availableYears.indexOf(currentYear);
+    canPrev = currentIndex < availableYears.length - 1 && currentIndex !== -1;
+    canNext = currentIndex > 0;
+  }
+
+  // 禁用/启用按钮
+  prevButton.disabled = !canPrev;
+  nextButton.disabled = !canNext;
+  
+  // 更新按钮样式
+  if (prevButton.disabled) {
+    prevButton.style.opacity = '0.5';
+    prevButton.style.cursor = 'not-allowed';
+  } else {
+    prevButton.style.opacity = '1';
+    prevButton.style.cursor = 'pointer';
+  }
+  
+  if (nextButton.disabled) {
+    nextButton.style.opacity = '0.5';
+    nextButton.style.cursor = 'not-allowed';
+  } else {
+    nextButton.style.opacity = '1';
+    nextButton.style.cursor = 'pointer';
+  }
+}
+
+// 切换年份
+async function changeYear(delta) {
+  if (usingApi && apiYears.startYear && apiYears.endYear) {
+    const target = currentYear + delta;
+    if (target < apiYears.startYear || target > apiYears.endYear) return;
+    currentYear = target;
+    document.getElementById('current-year').textContent = currentYear;
+    // 若该年数据尚未载入，则拉取
+    if (!hasDataForYear(currentYear)) {
+      try { await fetchYearData(currentYear); } catch (e) { console.warn('载入该年数据失败:', e?.message || e); }
+    }
+    generateCalendar(currentYear);
+    return;
+  }
+
+  // 本地数据：依旧按可用年份数组切换
+  const currentIndex = availableYears.indexOf(currentYear);
+  const newIndex = currentIndex - delta; // delta=1 向前（更新），-1 向后（更旧）
+  if (newIndex >= 0 && newIndex < availableYears.length) {
+    currentYear = availableYears[newIndex];
+    document.getElementById('current-year').textContent = currentYear;
+    generateCalendar(currentYear);
+  }
+}
+
+function hasDataForYear(year) {
+  const y = String(year);
+  for (const k of Object.keys(events)) {
+    if (k.startsWith(y + '-')) return true;
+  }
+  return false;
+}
+
+// 初始化日历
+async function initCalendar() {
+  await loadEvents();
+
+  // 重新计算可用年份（API 模式下已由 years API 决定）
+  if (!usingApi) {
+    availableYears = getAvailableYears();
+    currentYear = availableYears.length > 0 ? availableYears[0] : new Date().getFullYear();
+  }
+
+  const hasAny = Object.keys(events).length > 0;
+  if (!hasAny) {
+    document.getElementById('calendar-container').innerHTML = '<p>暂无事件记录</p>';
+    return;
+  }
+  
+  document.getElementById('current-year').textContent = currentYear;
+  generateCalendar(currentYear);
+}
+
+// 页面加载时初始化
+document.addEventListener('DOMContentLoaded', function() {
+  initCalendar();
+});
+</script>
